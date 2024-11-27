@@ -1,19 +1,18 @@
 -- Initialisation des variables
-local monitor = peripheral.find("monitor")
 local printer = peripheral.find("printer")
 local pastebinURL = "https://pastebin.com/raw/"
 
 -- Fonction pour dessiner l'interface utilisateur
 local function drawUI()
-    monitor.clear()
-    monitor.setCursorPos(1, 1)
-    monitor.write("Entrez le lien Pastebin ou le code:")
-    monitor.setCursorPos(1, 2)
-    monitor.write("Lien: ")
-    monitor.setCursorPos(1, 3)
-    monitor.write("Code: ")
-    monitor.setCursorPos(1, 4)
-    monitor.write("Appuyez sur Entrée pour imprimer le livre.")
+    term.clear()
+    term.setCursorPos(1, 1)
+    term.write("Entrez le lien Pastebin ou le code:")
+    term.setCursorPos(1, 2)
+    term.write("Lien: ")
+    term.setCursorPos(1, 3)
+    term.write("Code: ")
+    term.setCursorPos(1, 4)
+    term.write("Appuyez sur Entrée pour imprimer le livre.")
 end
 
 -- Fonction pour récupérer le contenu du Pastebin
@@ -40,9 +39,13 @@ end
 -- Boucle principale
 while true do
     drawUI()
-    local event, side, x, y = os.pullEvent("monitor_touch")
-    if y == 2 then
-        monitor.setCursorPos(7, 2)
+    term.setCursorPos(1, 5)
+    term.write("Choisissez une option (1 pour lien, 2 pour code): ")
+    local choice = read()
+
+    if choice == "1" then
+        term.setCursorPos(1, 6)
+        term.write("Entrez le lien Pastebin: ")
         local url = read()
         local code = url:match("pastebin%.com/([%w]+)")
         if code then
@@ -50,22 +53,30 @@ while true do
             if content then
                 printBook(content)
             else
-                monitor.setCursorPos(1, 5)
-                monitor.write("Erreur: Impossible de récupérer le contenu du Pastebin.")
+                term.setCursorPos(1, 7)
+                term.write("Erreur: Impossible de récupérer le contenu du Pastebin.")
             end
         else
-            monitor.setCursorPos(1, 5)
-            monitor.write("Erreur: Lien Pastebin invalide.")
+            term.setCursorPos(1, 7)
+            term.write("Erreur: Lien Pastebin invalide.")
         end
-    elseif y == 3 then
-        monitor.setCursorPos(7, 3)
+    elseif choice == "2" then
+        term.setCursorPos(1, 6)
+        term.write("Entrez le code Pastebin: ")
         local code = read()
         local content = getPastebinContent(code)
         if content then
             printBook(content)
         else
-            monitor.setCursorPos(1, 5)
-            monitor.write("Erreur: Impossible de récupérer le contenu du Pastebin.")
+            term.setCursorPos(1, 7)
+            term.write("Erreur: Impossible de récupérer le contenu du Pastebin.")
         end
+    else
+        term.setCursorPos(1, 7)
+        term.write("Erreur: Choix invalide.")
     end
+
+    term.setCursorPos(1, 8)
+    term.write("Appuyez sur une touche pour continuer...")
+    os.pullEvent("key")
 end
