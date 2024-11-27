@@ -1,82 +1,92 @@
--- Initialisation des variables
-local printer = peripheral.find("printer")
-local pastebinURL = "https://pastebin.com/raw/"
+-- Nom du programme : PrintBookFromPastebin.lua
 
--- Fonction pour dessiner l'interface utilisateur
+-- Vérification de la présence de l'imprimante
+local printer = peripheral.find("printer")
+if not printer then
+    print("Erreur : Aucun périphérique 'printer' détecté.")
+    return
+end
+
+-- Fonction pour dessiner une interface simple
 local function drawUI()
     term.clear()
     term.setCursorPos(1, 1)
-    term.write("Entrez le lien Pastebin ou le code:")
-    term.setCursorPos(1, 2)
-    term.write("Lien: ")
-    term.setCursorPos(1, 3)
-    term.write("Code: ")
-    term.setCursorPos(1, 4)
-    term.write("Appuyez sur Entrée pour imprimer le livre.")
+    print("=== Imprimeur de Livres Pastebin ===")
+    print("1. Entrer un lien complet")
+    print("2. Entrer un code seulement")
+    print("3. Quitter")
 end
 
--- Fonction pour récupérer le contenu du Pastebin
-local function getPastebinContent(code)
-    local response = http.get(pastebinURL .. code)
-    if response then
-        return response.readAll()
+-- Fonction pour récupérer du contenu depuis Pastebin
+local function fetchFromPastebin(codeOrLink)
+    local code
+    if codeOrLink:find("pastebin.com/") then
+        code = codeOrLink:match("pastebin.com/([%w]+)$")
     else
+        code = codeOrLink
+    end
+
+    if not code then
+        print("Erreur : Lien ou code invalide.")
         return nil
     end
+
+    local response = http.get("https://pastebin.com/raw/" .. code)
+    if not response then
+        print("Erreur : Impossible de récupérer les données.")
+        return nil
+    end
+
+    local content = response.readAll()
+    response.close()
+    return content
 end
 
--- Fonction pour imprimer le livre
-local function printBook(content)
-    local book = {}
+-- Fonction pour imprimer du texte sur un livre
+local function printToBook(content)
+    printer.newPage()
+    printer.setPageTitle("Livre de Pastebin")
+
+    local x, y = 1, 1
     for line in content:gmatch("[^\r\n]+") do
-        table.insert(book, line)
+        if not printer.write(line) then
+            -- Si une page est pleine
+            printer.endPage()
+            printer.newPage()
+        end
+        printer.write("\n")
     end
-    printer.setPageTitle("Livre Pastebin")
-    printer.setPageText(book)
-    printer.printBook()
+
+    printer.endPage()
+    print("Impression terminée. Vérifiez l'imprimante.")
 end
 
 -- Boucle principale
 while true do
     drawUI()
-    term.setCursorPos(1, 5)
-    term.write("Choisissez une option (1 pour lien, 2 pour code): ")
+    write("Votre choix : ")
     local choice = read()
 
     if choice == "1" then
-        term.setCursorPos(1, 6)
-        term.write("Entrez le lien Pastebin: ")
-        local url = read()
-        local code = url:match("pastebin%.com/([%w]+)")
-        if code then
-            local content = getPastebinContent(code)
-            if content then
-                printBook(content)
-            else
-                term.setCursorPos(1, 7)
-                term.write("Erreur: Impossible de récupérer le contenu du Pastebin.")
-            end
-        else
-            term.setCursorPos(1, 7)
-            term.write("Erreur: Lien Pastebin invalide.")
+        write("Entrez le lien complet : ")
+        local link = read()
+        local content = fetchFromPastebin(link)
+        if content then
+            printToBook(content)
         end
     elseif choice == "2" then
-        term.setCursorPos(1, 6)
-        term.write("Entrez le code Pastebin: ")
+        write("Entrez le code Pastebin : ")
         local code = read()
-        local content = getPastebinContent(code)
+        local content = fetchFromPastebin(code)
         if content then
-            printBook(content)
-        else
-            term.setCursorPos(1, 7)
-            term.write("Erreur: Impossible de récupérer le contenu du Pastebin.")
+            printToBook(content)
         end
+    elseif choice == "3" then
+        print("Au revoir !")
+        break
     else
-        term.setCursorPos(1, 7)
-        term.write("Erreur: Choix invalide.")
+        print("Choix invalide. Essayez encore.")
     end
 
-    term.setCursorPos(1, 8)
-    term.write("Appuyez sur une touche pour continuer...")
-    os.pullEvent("key")
+    sleep(1)
 end
