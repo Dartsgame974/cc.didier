@@ -60,7 +60,7 @@ local function splitIntoPages(text)
 end
 
 -- Fonction pour imprimer un livre
-local function printBook(title, text)
+local function printBook(title, text, copies)
     local pages = splitIntoPages(text)
     
     -- Vérifier si une imprimante est connectée
@@ -69,25 +69,29 @@ local function printBook(title, text)
         return false, "Aucune imprimante trouvée"
     end
     
-    -- Imprimer chaque page
-    for i, page in ipairs(pages) do
-        if not printer.newPage() then
-            return false, "Plus de papier ou d'encre"
+    -- Imprimer le nombre d'exemplaires demandé
+    for copy = 1, copies do
+        -- Imprimer chaque page
+        for i, page in ipairs(pages) do
+            if not printer.newPage() then
+                return false, "Plus de papier ou d'encre"
+            end
+            
+            -- Imprimer le titre en haut de la page
+            printer.setCursorPos(1, 1)
+            printer.write(title .. " - Page " .. i)
+            
+            -- Imprimer le contenu de la page
+            for lineNum, line in ipairs(page) do
+                printer.setCursorPos(1, lineNum + 2)
+                printer.write(line)
+            end
         end
         
-        -- Imprimer le titre en haut de la page
-        printer.setCursorPos(1, 1)
-        printer.write(title .. " - Page " .. i)
-        
-        -- Imprimer le contenu de la page
-        for lineNum, line in ipairs(page) do
-            printer.setCursorPos(1, lineNum + 2)
-            printer.write(line)
-        end
+        printer.endPage()
     end
     
-    printer.endPage()
-    return true, "Livre imprimé avec succès"
+    return true, string.format("Livre imprimé avec succès (%d exemplaire%s)", copies, copies > 1 and "s" or "")
 end
 
 -- Interface utilisateur
@@ -124,6 +128,24 @@ local function drawMenu(selected, scroll, items, header)
     term.setTextColor(colors.white)
 end
 
+-- Fonction pour demander le nombre de copies
+local function askForCopies()
+    while true do
+        term.clear()
+        term.setCursorPos(1, 1)
+        print("Nombre d'exemplaires à imprimer:")
+        local input = read()
+        local copies = tonumber(input)
+        
+        if copies and copies > 0 and copies == math.floor(copies) then
+            return copies
+        else
+            print("Veuillez entrer un nombre entier positif")
+            os.sleep(2)
+        end
+    end
+end
+
 -- Menu principal
 local function mainMenu()
     local favorites = loadFavorites()
@@ -151,13 +173,16 @@ local function mainMenu()
                 print("Entrez le titre du livre:")
                 local title = read()
                 
+                -- Demander le nombre de copies
+                local copies = askForCopies()
+                
                 -- Télécharger le contenu
                 local response = http.get("https://pastebin.com/raw/" .. link:match("pastebin.com/([^/]+)"))
                 if response then
                     local content = response.readAll()
                     response.close()
                     
-                    local success, message = printBook(title, content)
+                    local success, message = printBook(title, content, copies)
                     print(message)
                     
                     print("Voulez-vous sauvegarder ce livre en favori? (o/n)")
@@ -202,11 +227,15 @@ local function mainMenu()
                         else
                             -- Imprimer le favori sélectionné
                             local fav = favorites[favSelected]
+                            
+                            -- Demander le nombre de copies
+                            local copies = askForCopies()
+                            
                             local response = http.get("https://pastebin.com/raw/" .. fav.link:match("pastebin.com/([^/]+)"))
                             if response then
                                 local content = response.readAll()
                                 response.close()
-                                local success, message = printBook(fav.title, content)
+                                local success, message = printBook(fav.title, content, copies)
                                 term.clear()
                                 term.setCursorPos(1, 1)
                                 print(message)
