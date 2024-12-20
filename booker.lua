@@ -1,159 +1,172 @@
-if not fs.exists("basalt.lua") then
-    shell.run("wget run https://basalt.madefor.cc/install.lua release latest.lua")
-end
+--[[
+    Programme : Imprimante de livres avec gestion des favoris
+    Auteur : ComputerCraft Genie
+    Description : Permet d'imprimer des livres à partir d'un lien Pastebin,
+                  de gérer des favoris et de personnaliser les titres.
+]]--
 
-local basalt = require("basalt")
+-- Chemin de sauvegarde des favoris
+local FAVORITES_FILE = "book_favorites.txt"
 
-local main = basalt.createFrame()
-
-local titleInput = main:addInput()
-    :setPosition(2, 2)
-    :setSize(30, 3)
-    :setDefaultText("Entrez le titre du livre")
-
-local pastebinInput = main:addInput()
-    :setPosition(2, 6)
-    :setSize(30, 3)
-    :setDefaultText("Lien Pastebin (ex: abc123)")
-
-local downloadButton = main:addButton()
-    :setPosition(2, 10)
-    :setSize(30, 3)
-    :setText("Télécharger et imprimer")
-
-local favoritesFrame = main:addFrame()
-    :setPosition(35, 2)
-    :setSize(25, 20)
-    :setScrollable()
-
-local favoritesTitle = favoritesFrame:addLabel()
-    :setPosition(2, 1)
-    :setText("⭐ Favoris")
-
-local favoritesList = favoritesFrame:addList()
-    :setPosition(2, 3)
-    :setSize(20, 15)
-
-local addFavoriteButton = main:addButton()
-    :setPosition(2, 14)
-    :setSize(30, 3)
-    :setText("Ajouter aux Favoris")
-
-local removeFavoriteButton = main:addButton()
-    :setPosition(2, 18)
-    :setSize(30, 3)
-    :setText("Supprimer des Favoris")
-
-local function formatTextToPages(text, linesPerPage)
-    local pages = {}
-    local currentPage = {}
+-- Fonction pour diviser une chaîne de texte en lignes d'une certaine longueur
+local function splitIntoLines(text, maxWidth)
+    local lines = {}
     for line in text:gmatch("[^\r\n]+") do
-        table.insert(currentPage, line)
-        if #currentPage >= linesPerPage then
-            table.insert(pages, table.concat(currentPage, "\n"))
-            currentPage = {}
+        while #line > maxWidth do
+            table.insert(lines, line:sub(1, maxWidth))
+            line = line:sub(maxWidth + 1)
         end
+        table.insert(lines, line)
     end
-    if #currentPage > 0 then
-        table.insert(pages, table.concat(currentPage, "\n"))
-    end
-    return pages
+    return lines
 end
 
-local function downloadTextFromPastebin(pastebinID)
+-- Fonction pour charger le contenu d'un Pastebin
+local function loadFromPastebin(pastebinID)
     local url = "https://pastebin.com/raw/" .. pastebinID
-    local handle, errorMessage = http.get(url)
-    if handle then
-        local content = handle.readAll()
-        handle.close()
+    local response = http.get(url)
+    if response then
+        local content = response.readAll()
+        response.close()
         return content
     else
-        return nil, "Erreur de téléchargement : " .. (errorMessage or "Inconnu")
+        return nil, "Impossible de récupérer le contenu de Pastebin."
     end
 end
 
-local function printBook(title, text)
-    local pages = formatTextToPages(text, 14)
-    for i, page in ipairs(pages) do
-        print("📘 Impression de la page " .. i .. "...")
-        print(page)
-    end
-    print("📚 Livre imprimé avec succès !")
-end
-
-downloadButton:onClick(function()
-    local title = titleInput:getValue()
-    local pastebinID = pastebinInput:getValue()
-    if title == "" or pastebinID == "" then
-        basalt.debug("Erreur : Le titre et le lien Pastebin doivent être renseignés.")
+-- Fonction pour imprimer un livre
+local function printBook(title, content)
+    if not peripheral.find("printer") then
+        print("Imprimante introuvable.")
         return
     end
-    basalt.debug("Téléchargement du texte depuis Pastebin...")
-    local content, errorMessage = downloadTextFromPastebin(pastebinID)
-    if content then
-        basalt.debug("✅ Téléchargement réussi. Impression du livre...")
-        printBook(title, content)
-    else
-        basalt.debug(errorMessage)
-    end
-end)
 
-local function loadFavorites()
-    if fs.exists("favoris.txt") then
-        local file = fs.open("favoris.txt", "r")
-        local favorites = textutils.unserialize(file.readAll())
-        file.close()
-        return favorites or {}
-    else
-        return {}
+    local printer = peripheral.find("printer")
+    printer.newPage()
+    printer.setPageTitle(title)
+
+    local lines = splitIntoLines(content, 25) -- Largeur maximale d'une ligne (25 caractères)
+
+    for i, line in ipairs(lines) do
+        printer.write(line)
+        if i % 21 == 0 then -- 21 lignes par page
+            printer.endPage()
+            printer.newPage()
+        else
+            printer.write("\n")
+        end
     end
+
+    printer.endPage()
+    print("Le livre a été imprimé avec succès !")
 end
 
+-- Fonction pour sauvegarder les favoris
 local function saveFavorites(favorites)
-    local file = fs.open("favoris.txt", "w")
+    local file = fs.open(FAVORITES_FILE, "w")
     file.write(textutils.serialize(favorites))
     file.close()
 end
 
-local function updateFavoritesList()
-    favoritesList:clear()
-    for _, favorite in ipairs(loadFavorites()) do
-        favoritesList:addItem(favorite.title)
+-- Fonction pour charger les favoris
+local function loadFavorites()
+    if not fs.exists(FAVORITES_FILE) then return {} end
+    local file = fs.open(FAVORITES_FILE, "r")
+    local content = file.readAll()
+    file.close()
+    return textutils.unserialize(content) or {}
+end
+
+-- Fonction principale de l'interface utilisateur
+local function mainMenu()
+    local favorites = loadFavorites()
+    while true do
+        term.clear()
+        term.setCursorPos(1, 1)
+        print("===== Imprimante de livres =====")
+        print("[1] Imprimer un livre depuis un lien Pastebin")
+        print("[2] Afficher la liste des favoris")
+        print("[3] Quitter")
+        
+        local choice = read()
+        
+        if choice == "1" then
+            print("\nEntrez le lien Pastebin (seulement l'ID) :")
+            local pastebinID = read()
+            print("Entrez le titre du livre :")
+            local title = read()
+            local content, err = loadFromPastebin(pastebinID)
+            if content then
+                print("Contenu chargé ! Impression en cours...")
+                printBook(title, content)
+            else
+                print("Erreur : " .. (err or "Inconnue"))
+            end
+            print("Appuyez sur une touche pour continuer.")
+            read()
+            
+        elseif choice == "2" then
+            while true do
+                term.clear()
+                term.setCursorPos(1, 1)
+                print("===== Favoris =====")
+                for i, fav in ipairs(favorites) do
+                    print("[" .. i .. "] " .. fav.title)
+                end
+                print("[A] Ajouter un nouveau favori")
+                print("[S] Supprimer un favori")
+                print("[Q] Retour au menu principal")
+                
+                local favChoice = read()
+                if favChoice == "A" or favChoice == "a" then
+                    print("\nEntrez le lien Pastebin (seulement l'ID) :")
+                    local pastebinID = read()
+                    print("Entrez le titre du favori :")
+                    local title = read()
+                    table.insert(favorites, { id = pastebinID, title = title })
+                    saveFavorites(favorites)
+                    print("Favori ajouté avec succès !")
+                    
+                elseif favChoice == "S" or favChoice == "s" then
+                    print("\nEntrez le numéro du favori à supprimer :")
+                    local index = tonumber(read())
+                    if index and favorites[index] then
+                        table.remove(favorites, index)
+                        saveFavorites(favorites)
+                        print("Favori supprimé avec succès !")
+                    else
+                        print("Favori non valide.")
+                    end
+                    
+                elseif favChoice == "Q" or favChoice == "q" then
+                    break
+                else
+                    local index = tonumber(favChoice)
+                    if index and favorites[index] then
+                        local fav = favorites[index]
+                        print("Chargement du favori " .. fav.title)
+                        local content, err = loadFromPastebin(fav.id)
+                        if content then
+                            printBook(fav.title, content)
+                        else
+                            print("Erreur : " .. (err or "Inconnue"))
+                        end
+                    end
+                end
+                print("Appuyez sur une touche pour continuer.")
+                read()
+            end
+            
+        elseif choice == "3" then
+            print("Au revoir !")
+            break
+            
+        else
+            print("Choix invalide.")
+            sleep(1)
+        end
     end
 end
 
-addFavoriteButton:onClick(function()
-    local title = titleInput:getValue()
-    local pastebinID = pastebinInput:getValue()
-    if title == "" or pastebinID == "" then
-        basalt.debug("Erreur : Le titre et le lien Pastebin doivent être renseignés.")
-        return
-    end
-    local favorites = loadFavorites()
-    table.insert(favorites, { title = title, pastebinID = pastebinID })
-    saveFavorites(favorites)
-    updateFavoritesList()
-    basalt.debug("✅ Livre ajouté aux favoris.")
-end)
-
-removeFavoriteButton:onClick(function()
-    local selected = favoritesList:getSelectedItem()
-    if not selected then
-        basalt.debug("Erreur : Aucun livre sélectionné.")
-        return
-    end
-    local favorites = loadFavorites()
-    for i, favorite in ipairs(favorites) do
-        if favorite.title == selected.text then
-            table.remove(favorites, i)
-            break
-        end
-    end
-    saveFavorites(favorites)
-    updateFavoritesList()
-    basalt.debug("🗑️ Livre supprimé des favoris.")
-end)
-
-updateFavoritesList()
-
-basalt.autoUpdate()
+-- Lancer le programme principal
+mainMenu()
