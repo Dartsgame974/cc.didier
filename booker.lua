@@ -1,12 +1,7 @@
--- Programme d'impression de livres avec gestion des favoris
--- Nécessite un ordinateur et une imprimante
-
--- Configuration
-local PAGE_WIDTH = 25  -- Largeur max d'une page
-local PAGE_HEIGHT = 14 -- Hauteur max d'une page
+local PAGE_WIDTH = 25
+local PAGE_HEIGHT = 14
 local FAVORITES_FILE = "book_favorites.txt"
 
--- Fonction pour charger les favoris
 local function loadFavorites()
     if not fs.exists(FAVORITES_FILE) then
         return {}
@@ -17,14 +12,12 @@ local function loadFavorites()
     return data or {}
 end
 
--- Fonction pour sauvegarder les favoris
 local function saveFavorites(favorites)
     local file = fs.open(FAVORITES_FILE, "w")
     file.write(textutils.serialize(favorites))
     file.close()
 end
 
--- Fonction pour diviser le texte en pages
 local function splitIntoPages(text)
     local pages = {}
     local currentPage = {}
@@ -59,42 +52,39 @@ local function splitIntoPages(text)
     return pages
 end
 
--- Fonction pour imprimer un livre
 local function printBook(title, text, copies)
     local pages = splitIntoPages(text)
-    
-    -- Vérifier si une imprimante est connectée
     local printer = peripheral.find("printer")
     if not printer then
         return false, "Aucune imprimante trouvée"
     end
     
-    -- Imprimer le nombre d'exemplaires demandé
+    printer.newPage()
+    printer.endPage()
+    
     for copy = 1, copies do
-        -- Imprimer chaque page
         for i, page in ipairs(pages) do
             if not printer.newPage() then
-                return false, "Plus de papier ou d'encre"
+                printer.endPage()
+                if not printer.newPage() then
+                    return false, "Plus de papier ou d'encre"
+                end
             end
             
-            -- Imprimer le titre en haut de la page
             printer.setCursorPos(1, 1)
             printer.write(title .. " - Page " .. i)
             
-            -- Imprimer le contenu de la page
             for lineNum, line in ipairs(page) do
                 printer.setCursorPos(1, lineNum + 2)
                 printer.write(line)
             end
         end
-        
-        printer.endPage()
     end
     
+    printer.endPage()
     return true, string.format("Livre imprimé avec succès (%d exemplaire%s)", copies, copies > 1 and "s" or "")
 end
 
--- Interface utilisateur
 local function drawMenu(selected, scroll, items, header)
     term.clear()
     term.setCursorPos(1, 1)
@@ -128,7 +118,6 @@ local function drawMenu(selected, scroll, items, header)
     term.setTextColor(colors.white)
 end
 
--- Fonction pour demander le nombre de copies
 local function askForCopies()
     while true do
         term.clear()
@@ -146,7 +135,6 @@ local function askForCopies()
     end
 end
 
--- Menu principal
 local function mainMenu()
     local favorites = loadFavorites()
     local options = {
@@ -173,10 +161,8 @@ local function mainMenu()
                 print("Entrez le titre du livre:")
                 local title = read()
                 
-                -- Demander le nombre de copies
                 local copies = askForCopies()
                 
-                -- Télécharger le contenu
                 local response = http.get("https://pastebin.com/raw/" .. link:match("pastebin.com/([^/]+)"))
                 if response then
                     local content = response.readAll()
@@ -197,7 +183,6 @@ local function mainMenu()
                 os.sleep(2)
                 
             elseif selected == 2 then
-                -- Menu des favoris
                 local favSelected = 1
                 local scroll = 1
                 
@@ -225,10 +210,8 @@ local function mainMenu()
                         if favSelected == #favOptions then
                             break
                         else
-                            -- Imprimer le favori sélectionné
                             local fav = favorites[favSelected]
                             
-                            -- Demander le nombre de copies
                             local copies = askForCopies()
                             
                             local response = http.get("https://pastebin.com/raw/" .. fav.link:match("pastebin.com/([^/]+)"))
@@ -261,5 +244,4 @@ local function mainMenu()
     end
 end
 
--- Lancer le programme
 mainMenu()
