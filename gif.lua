@@ -1,657 +1,261 @@
--- 32vid-player from sanjuuni
+-- 32vid-player-mini from sanjuuni
 -- Licensed under the MIT license
 
-local inflate do
-
-    local floor = math.floor
-    local ceil = math.ceil
-    local min = math.min
-    local max = math.max
-
-    -- utility functions
-
-    local function memoize(f)
-        local cache = {}
-        return function(...)
-            local key = table.concat({...}, "-")
-            if not cache[key] then
-                cache[key] = f(...)
-            end
-            return cache[key]
-        end
-    end
-
-    local function int(bytes)
-        local n = 0
-        for i = 1, #bytes do
-            n = 256*n + bytes:sub(i, i):byte()
-        end
-        return n
-    end
-    int = memoize(int)
-
-    local function bint(bits)
-        return tonumber(bits, 2) or 0
-    end
-    bint = memoize(bint)
-
-    local function bits(b, width)
-        local s = ""
-        if type(b) == "number" then
-            for i = 1, width do
-                s = b%2 .. s
-                b = floor(b/2)
-            end
-        else
-            for i = 1, #b do
-                s = s .. bits(b:byte(i), 8):reverse()
-                assert(#s == i * 8, s)
-            end
-        end
-        return s
-    end
-    bits = memoize(bits)
-
-    local function fill(bytes, len)
-        return bytes:rep(floor(len / #bytes)) .. bytes:sub(1, len % #bytes)
-    end
-
-    local function zip(t1, t2)
-        local zipped = {}
-        for i = 1, max(#t1, #t2) do
-            zipped[#zipped + 1] = {t1[i], t2[i]}
-        end
-        return zipped
-    end
-
-    local function unzip(zipped)
-        local t1, t2 = {}, {}
-        for i = 1, #zipped do
-            t1[#t1 + 1] = zipped[i][1]
-            t2[#t2 + 1] = zipped[i][2]
-        end
-        return t1, t2
-    end
-
-    local function map(f, t)
-        local mapped = {}
-        for i = 1, #t do
-            mapped[#mapped + 1] = f(t[i], i)
-        end
-        return mapped
-    end
-
-    local function filter(pred, t)
-        local filtered = {}
-        for i = 1, #t do
-            if pred(t[i], i) then
-                filtered[#filtered + 1] = t[i]
-            end
-        end
-        return filtered
-    end
-
-    local function find(key, t)
-        if type(key) == "function" then
-            for i = 1, #t do
-                if key(t[i]) then
-                    return i
-                end
-            end
-            return nil
-        else
-            return find(function(x) return x == key end, t)
-        end
-    end
-
-    local function slice(t, i, j, step)
-        local sliced = {}
-        for k = i < 1 and 1 or i, i < 1 and #t + i or j or #t, step or 1 do
-            sliced[#sliced + 1] = t[k]
-        end
-        return sliced
-    end
-
-    local function range(i, j)
-        local r = {}
-        for k = j and i or 0, j or i - 1 do
-            r[#r + 1] = k
-        end
-        return r
-    end
-
-    -- streams
-
-    local function output_stream()
-        local stream, buffer = {}, {}
-        local curr = 0
-
-        function stream:write(bytes)
-            for i = 1, #bytes do
-                buffer[#buffer + 1] = bytes:sub(i, i)
-            end
-            curr = curr + #bytes
-        end
-
-        function stream:back_read(offset, n)
-            local read = {}
-            for i = curr - offset + 1, curr - offset + n do
-                read[#read + 1] = buffer[i]
-            end
-            return table.concat(read)
-        end
-
-        function stream:back_copy(dist, len)
-            local start, copied = curr - dist + 1, {}
-            for i = start, min(start + len, curr) do
-                copied[#copied + 1] = buffer[i]
-            end
-            self:write(fill(table.concat(copied), len))
-        end
-
-        function stream:pos()
-            return curr
-        end
-
-        function stream:raw()
-            return table.concat(buffer)
-        end
-
-        return stream
-    end
-
-    local function bit_stream(raw, offset)
-        local stream = {}
-        local curr = 0
-        offset = offset or 0
-
-        function stream:read(n, reverse)
-            local start = floor(curr/8) + offset + 1
-            local bb = ""
-            for i = start, start + ceil(n/8) do
-                local b = raw:byte(i)
-                for j = 0, 7 do bb = bb .. bit32.extract(b, j, 1) end
-            end
-            local b = bb:sub(curr%8 + 1, curr%8 + n)
-            curr = curr + n
-            return reverse and b or b:reverse()
-        end
-
-        function stream:seek(n)
-            if n == "beg" then
-                curr = 0
-            elseif n == "end" then
-                curr = #raw
-            else
-                curr = curr + n
-            end
-            return self
-        end
-
-        function stream:is_empty()
-            return curr >= 8*#raw
-        end
-
-        function stream:pos()
-            return curr
-        end
-
-        return stream
-    end
-
-    -- inflate
-
-    local CL_LENS_ORDER = {16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15}
-    local MAX_BITS = 15
-    local PT_WIDTH = 8
-
-    local function cl_code_lens(stream, hclen)
-        local code_lens = {}
-        for i = 1, hclen do
-            code_lens[#code_lens + 1] = bint(stream:read(3))
-        end
-        return code_lens
-    end
-
-    local function code_tree(lens, alphabet)
-        alphabet = alphabet or range(#lens)
-        local using = filter(function(x, i) return lens[i] and lens[i] > 0 end, alphabet)
-        lens = filter(function(x) return x > 0 end, lens)
-        local tree = zip(lens, using)
-        table.sort(tree, function(a, b)
-            if a[1] == b[1] then
-                return a[2] < b[2]
-            else
-                return a[1] < b[1]
-            end
-        end)
-        return unzip(tree)
-    end
-
-    local function codes(lens)
-        local codes = {}
-        local code = 0
-        for i = 1, #lens do
-            codes[#codes + 1] = bits(code, lens[i])
-            if i < #lens then
-                code = (code + 1)*2^(lens[i + 1] - lens[i])
-            end
-        end
-        return codes
-    end
-
-    local prefix_table
-    local function handle_long_codes(codes, alphabet, pt)
-        local i = find(function(x) return #x > PT_WIDTH end, codes)
-        local long = slice(zip(codes, alphabet), i)
-        i = 0
-        repeat
-            local prefix = long[i + 1][1]:sub(1, PT_WIDTH)
-            local same = filter(function(x) return x[1]:sub(1, PT_WIDTH) == prefix end, long)
-            same = map(function(x) return {x[1]:sub(PT_WIDTH + 1), x[2]} end, same)
-            pt[prefix] = {rest = prefix_table(unzip(same)), unused = 0}
-            i = i + #same
-        until i == #long
-    end
-
-    function prefix_table(codes, alphabet)
-        local pt = {}
-        if #codes[#codes] > PT_WIDTH then
-            handle_long_codes(codes, alphabet, pt)
-        end
-        for i = 1, #codes do
-            local code = codes[i]
-            if #code > PT_WIDTH then
-                break
-            end
-            local entry = {value = alphabet[i], unused = PT_WIDTH - #code}
-            if entry.unused == 0 then
-                pt[code] = entry
-            else
-                for i = 0, 2^entry.unused - 1 do
-                    pt[code .. bits(i, entry.unused)] = entry
-                end
-            end
-        end
-        return pt
-    end
-
-    local function huffman_decoder(lens, alphabet)
-        local base_codes = prefix_table(codes(lens), alphabet)
-        return function(stream)
-            local codes = base_codes
-            local entry
-            repeat
-                entry = codes[stream:read(PT_WIDTH, true)]
-                stream:seek(-entry.unused)
-                codes = entry.rest
-            until not codes
-            return entry.value
-        end
-    end
-
-    local function code_lens(stream, decode, n)
-        local lens = {}
-        repeat
-            local value = decode(stream)
-            if value < 16 then
-                lens[#lens + 1] = value
-            elseif value == 16 then
-                for i = 1, bint(stream:read(2)) + 3 do
-                    lens[#lens + 1] = lens[#lens]
-                end
-            elseif value == 17 then
-                for i = 1, bint(stream:read(3)) + 3 do
-                    lens[#lens + 1] = 0
-                end
-            elseif value == 18 then
-                for i = 1, bint(stream:read(7)) + 11 do
-                    lens[#lens + 1] = 0
-                end
-            end
-        until #lens == n
-        return lens
-    end
-
-    local function code_trees(stream)
-        local hlit = bint(stream:read(5)) + 257
-        local hdist = bint(stream:read(5)) + 1
-        local hclen = bint(stream:read(4)) + 4
-        local cl_decode = huffman_decoder(code_tree(cl_code_lens(stream, hclen), CL_LENS_ORDER))
-        local ll_decode = huffman_decoder(code_tree(code_lens(stream, cl_decode, hlit)))
-        local d_decode = huffman_decoder(code_tree(code_lens(stream, cl_decode, hdist)))
-        return ll_decode, d_decode
-    end
-
-    local function extra_bits(value)
-        if value >= 4 and value <= 29 then
-            return floor(value/2) - 1
-        elseif value >= 265 and value <= 284 then
-            return ceil(value/4) - 66
-        else
-            return 0
-        end
-    end
-    extra_bits = memoize(extra_bits)
-
-    local function decode_len(value, bits)
-        assert(value >= 257 and value <= 285, "value out of range")
-        assert(#bits == extra_bits(value), "wrong number of extra bits")
-        if value <= 264 then
-            return value - 254
-        elseif value == 285 then
-            return 258
-        end
-        local len = 11
-        for i = 1, #bits - 1 do
-            len = len + 2^(i+2)
-        end
-        return floor(bint(bits) + len + ((value - 1) % 4)*2^#bits)
-    end
-    decode_len = memoize(decode_len)
-
-    local function a(n)
-        if n <= 3 then
-            return n + 2
-        else
-            return a(n-1) + 2*a(n-2) - 2*a(n-3)
-        end
-    end
-    a = memoize(a)
-
-    local function decode_dist(value, bits)
-        assert(value >= 0 and value <= 29, "value out of range")
-        assert(#bits == extra_bits(value), "wrong number of extra bits)")
-        return bint(bits) + a(value - 1)
-    end
-    decode_dist = memoize(decode_dist)
-
-    function inflate(data)
-        local stream = bit_stream(data)
-        local ostream = output_stream()
-        repeat
-            local bfinal, btype = bint(stream:read(1)), bint(stream:read(2))
-            assert(btype == 2, "compression method not supported")
-            local ll_decode, d_decode = code_trees(stream)
-            while true do
-                local value = ll_decode(stream)
-                if value < 256 then
-                    ostream:write(string.char(value))
-                elseif value == 256 then
-                    break
-                else
-                    local len = decode_len(value, stream:read(extra_bits(value)))
-                    value = d_decode(stream)
-                    local dist = decode_dist(value, stream:read(extra_bits(value)))
-                    ostream:back_copy(dist, len)
-                end
-            end
-        until bfinal == 1
-        return ostream:raw()
-    end
-
-end
+local bit32_band, bit32_lshift, bit32_rshift, math_frexp = bit32.band, bit32.lshift, bit32.rshift, math.frexp
+local function log2(n) local _, r = math_frexp(n) return r-1 end
 local dfpwm = require "cc.audio.dfpwm"
 
-local hexstr = "0123456789abcdef"
-local file, err = fs.open(shell.resolve(...), "rb")
-if not file then error(err) end
-if file.read(4) ~= "32VD" then file.close() error("Not a 32vid file") end
-local width, height, fps, nStreams, flags = ("<HHBBH"):unpack(file.read(8))
-local video, audio, subtitles
-for _ = 1, nStreams do
-    local size, nFrames, frameType = ("<IIB"):unpack(file.read(9))
-    print(("%X"):format(file.seek()), size, nFrames, frameType)
-    if frameType == 0 and not video then
-        local data = file.read(size)
-        if bit32.band(flags, 3) == 2 then data = inflate(data) end
-        video = {}
-        local pos = 1
-        local start = os.epoch "utc"
-        for i = 1, nFrames do
-            if i % 100 == 0 or i >= nFrames - 10 then print(i, os.epoch "utc" - start) start = os.epoch "utc" sleep(0) end
-            local frame = {palette = {}}
-            local tmp, tmppos = 0, 0
-            local use5bit, customcompress = bit32.btest(flags, 16), bit32.band(flags, 3) == 3
-            local codetree = {}
-            local solidchar, runlen
-            local function readField(isColor)
-                if customcompress then
-                    if runlen then
-                        local c = solidchar
-                        runlen = runlen - 1
-                        if runlen == 0 then runlen = nil end
-                        return c
-                    end
-                    if not isColor and solidchar then return solidchar end
-                    -- MARK: Huffman decoding
-                    local node = codetree
-                    while true do
-                        local n = bit32.extract(tmp, tmppos, 1)
-                        tmppos = tmppos - 1
-                        if tmppos < 0 then tmp, pos, tmppos = data:byte(pos), pos + 1, 7 end
-                        if type(node) ~= "table" then error(("Invalid tree state: position %X, frame %d"):format(pos+file.seek()-size-1, i)) end
-                        if type(node[n]) == "number" then
-                            local c = node[n]
-                            if isColor then
-                                if c > 15 then runlen = 2^(c-15)-1 return assert(solidchar)
-                                else solidchar = c end
-                            end
-                            return c
-                        else node = node[n] end
-                    end
-                else
-                    local n
-                    if tmppos * 5 + 5 > 32 then n = bit32.extract(math.floor(tmp / 0x1000000), tmppos * 5 - 24, 5)
-                    else n = bit32.extract(tmp, tmppos * 5, 5) end
-                    tmppos = tmppos - 1
-                    if tmppos < 0 then tmp, pos = (">I5"):unpack(data, pos) tmppos = 7 end
-                    return n
-                end
-            end
-            if customcompress then
-                -- MARK: Huffman tree reconstruction
-                -- read bit lengths
-                local bitlen = {}
-                if use5bit then
-                    for j = 0, 15 do
-                        bitlen[j*2+1], bitlen[j*2+2] = {s = j*2, l = bit32.rshift(data:byte(pos+j), 4)}, {s = j*2+1, l = bit32.band(data:byte(pos+j), 0x0F)}
-                    end
-                    pos = pos + 16
-                else
-                    for j = 0, 7 do
-                        tmp, pos = (">I5"):unpack(data, pos)
-                        bitlen[j*8+1] = {s = j*8+1, l = math.floor(tmp / 0x800000000)}
-                        bitlen[j*8+2] = {s = j*8+2, l = math.floor(tmp / 0x40000000) % 32}
-                        for k = 3, 8 do bitlen[j*8+k] = {s = j*8+k, l = bit32.extract(tmp, (8-k)*5, 5)} end
-                    end
-                end
-                do
-                    local j = 1
-                    while j <= #bitlen do
-                        if bitlen[j].l == 0 then table.remove(bitlen, j)
-                        else j = j + 1 end
-                    end
-                end
-                if #bitlen == 0 then
-                    -- screen is solid character
-                    solidchar = data:byte(pos)
-                    pos = pos + 1
-                else
-                    -- reconstruct codes from bit lengths
-                    table.sort(bitlen, function(a, b) if a.l == b.l then return a.s < b.s else return a.l < b.l end end)
-                    bitlen[1].c = 0
-                    for j = 2, #bitlen do bitlen[j].c = bit32.lshift(bitlen[j-1].c + 1, bitlen[j].l - bitlen[j-1].l) end
-                    -- create tree from codes
-                    for j = 1, #bitlen do
-                        local c = bitlen[j].c
-                        local node = codetree
-                        for k = bitlen[j].l - 1, 1, -1 do
-                            local n = bit32.extract(c, k, 1)
-                            if not node[n] then node[n] = {} end
-                            node = node[n]
-                            if type(node) == "number" then error(("Invalid tree state: position %X, frame %d, #bitlen = %d, current entry = %d"):format(pos, i, #bitlen, j)) end
-                        end
-                        local n = bit32.extract(c, 0, 1)
-                        node[n] = bitlen[j].s
-                    end
-                    -- read first byte
-                    tmp, tmppos, pos = data:byte(pos), 7, pos + 1
-                end
-            else readField() end
-            for y = 1, height do
-                local line = {"", "", "", {}}
-                for x = 1, width do
-                    if pos + 5 + 1 >= #data then print(i, pos, x, y) error() end
-                    local n = readField()
-                    line[1] = line[1] .. string.char(128 + (n % 0x20))
-                    line[4][x] = bit32.btest(n, 0x20)
-                end
-                frame[y] = line
-            end
-            if customcompress then
-                if tmppos == 7 then pos = pos - 1 end
-                codetree = {}
-                -- MARK: Huffman tree reconstruction
-                -- read bit lengths
-                local bitlen = {}
-                for j = 0, 11 do
-                    bitlen[j*2+1], bitlen[j*2+2] = {s = j*2, l = bit32.rshift(data:byte(pos+j), 4)}, {s = j*2+1, l = bit32.band(data:byte(pos+j), 0x0F)}
-                end
-                pos = pos + 12
-                do
-                    local j = 1
-                    while j <= #bitlen do
-                        if bitlen[j].l == 0 then table.remove(bitlen, j)
-                        else j = j + 1 end
-                    end
-                end
-                if #bitlen == 0 then
-                    -- screen is solid color
-                    solidchar = data:byte(pos)
-                    pos = pos + 1
-                    runlen = math.huge
-                else
-                    -- reconstruct codes from bit lengths
-                    table.sort(bitlen, function(a, b) if a.l == b.l then return a.s < b.s else return a.l < b.l end end)
-                    bitlen[1].c = 0
-                    for j = 2, #bitlen do bitlen[j].c = bit32.lshift(bitlen[j-1].c + 1, bitlen[j].l - bitlen[j-1].l) end
-                    -- create tree from codes
-                    for j = 1, #bitlen do
-                        local c = bitlen[j].c
-                        local node = codetree
-                        for k = bitlen[j].l - 1, 1, -1 do
-                            local n = bit32.extract(c, k, 1)
-                            if not node[n] then node[n] = {} end
-                            node = node[n]
-                            if type(node) == "number" then error(("Invalid tree state: position %X, frame %d, #bitlen = %d, current entry = %d"):format(pos, i, #bitlen, j)) end
-                        end
-                        local n = bit32.extract(c, 0, 1)
-                        node[n] = bitlen[j].s
-                    end
-                    -- read first byte
-                    tmp, tmppos, pos = data:byte(pos), 7, pos + 1
-                end
-                for y = 1, height do
-                    local line = frame[y]
-                    for x = 1, width do
-                        local c = readField(true)
-                        line[2] = line[2] .. hexstr:sub(c+1, c+1)
-                    end
-                end
-                runlen = nil
-                for y = 1, height do
-                    local line = frame[y]
-                    for x = 1, width do
-                        local c = readField(true)
-                        line[3] = line[3] .. hexstr:sub(c+1, c+1)
-                    end
-                end
-                if tmppos == 7 then pos = pos - 1 end
-            else
-                for y = 1, height do
-                    local line = frame[y]
-                    for x = 1, width do
-                        local c = data:byte(pos)
-                        pos = pos + 1
-                        if line[4][x] then c = bit32.bor(bit32.band(bit32.lshift(c, 4), 0xF0), bit32.rshift(c, 4)) end
-                        line[2] = line[2] .. hexstr:sub(bit32.band(c, 15)+1, bit32.band(c, 15)+1)
-                        line[3] = line[3] .. hexstr:sub(bit32.rshift(c, 4)+1, bit32.rshift(c, 4)+1)
-                    end
-                    line[4] = nil
-                end
-            end
-            for n = 1, 16 do frame.palette[n], pos = {data:byte(pos) / 255, data:byte(pos+1) / 255, data:byte(pos+2) / 255}, pos + 3 end
-            video[i] = frame
-        end
-    elseif frameType == 1 and not audio then
-        audio = {}
-        if bit32.band(flags, 12) == 0 then
-            for i = 1, math.ceil(size / 48000) do
-                local data
-                if jit then
-                    data = {}
-                    for j = 0, 5 do
-                        local t = {file.read(math.min(size - (i-1) * 48000 - j * 8000, 8000)):byte(1, -1)}
-                        if #t > 0 then for k = 1, #t do data[j*8000+k] = t[k] end end
-                    end
-                else data = {file.read(math.min(size - (i-1) * 48000, 48000)):byte(1, -1)} end
-                for j = 1, #data do data[j] = data[j] - 128 end
-                audio[i] = data
-            end
-        elseif bit32.band(flags, 12) == 4 then
-            local decode = dfpwm.make_decoder()
-            for i = 1, math.ceil(size / 6000) do
-                local data = file.read(math.min(size - (i-1)*6000, 6000))
-                if not data then break end
-                audio[i] = decode(data)
-            end
-        end
-    elseif frameType == 8 and not subtitles then
-        subtitles = {}
-        for _ = 1, nFrames do
-            local start, length, x, y, color, sz = ("<IIHHBxH"):unpack(file.read(16))
-            local text = file.read(sz)
-            local sub = {text, hexstr:sub(bit32.band(color, 15)+1, bit32.band(color, 15)+1):rep(#text),
-                hexstr:sub(bit32.rshift(color, 4)+1, bit32.rshift(color, 4)+1):rep(#text), x = x, y = y}
-            for n = start, start + length - 1 do
-                subtitles[n] = subtitles[n] or {}
-                subtitles[n][#subtitles[n]+1] = sub
-            end
-        end
-    end
-end
-file.close()
-if not video then error("No video stream found") end
-sleep(0)
-
 local speaker = peripheral.find "speaker"
-term.clear()
-local ok, err = pcall(parallel.waitForAll, function()
-    local start = os.epoch "utc"
-    for f, image in ipairs(video) do
-        for i, v in ipairs(image.palette) do term.setPaletteColor(2^(i-1), table.unpack(v)) end
-        for y, r in ipairs(image) do
-            term.setCursorPos(1, y)
-            term.blit(table.unpack(r))
-        end
-        if subtitles and subtitles[f-1] then
-            for _, v in ipairs(subtitles[f-1]) do
-                term.setCursorPos(v.x, v.y)
-                term.blit(table.unpack(v))
+local file
+local path = https://github.com/Dartsgame974/cc.didier/raw/refs/heads/main/az.32v
+if path:match "^https?://" then
+    file = assert(http.get(path, nil, true))
+else
+    file = assert(fs.open(shell.resolve(path), "rb"))
+end
+
+if file.read(4) ~= "32VD" then file.close() error("Not a 32Vid file") end
+local width, height, fps, nstreams, flags = ("<HHBBH"):unpack(file.read(8))
+--print(width, height, fps, nstreams, flags)
+if nstreams ~= 1 then file.close() error("Separate stream files not supported by this tool") end
+if bit32_band(flags, 1) == 0 then file.close() error("DEFLATE or no compression not supported by this tool") end
+local _, nframes, ctype = ("<IIB"):unpack(file.read(9))
+if ctype ~= 0x0C then file.close() error("Stream type not supported by this tool") end
+
+local monitors, mawidth, maheight
+if bit32.btest(flags, 0x20) then
+    mawidth, maheight = bit32_band(bit32_rshift(flags, 6), 7) + 1, bit32_band(bit32_rshift(flags, 9), 7) + 1
+    monitors = settings.get('sanjuuni.multimonitor')
+    if not monitors or #monitors < maheight or #monitors[1] < mawidth then
+        term.clear()
+        term.setCursorPos(1, 1)
+        print('This video needs monitors to be calibrated before being displayed. Please right-click each monitor in order, from the top left corner to the bottom right corner, going right first, then down.\n')
+        monitors = {}
+        local a = {}
+        for b = 1, maheight do
+            monitors[b] = {}
+            for c = 1, mawidth do
+                local d, e = term.getCursorPos()
+                for f = 1, maheight do
+                    term.setCursorPos(3, e + f - 1)
+                    term.clearLine()
+                    for g = 1, mawidth do term.blit('\x8F ', g == c and f == b and '00' or '77', 'ff') end
+                end
+                term.setCursorPos(3, e + maheight)
+                term.write('(' .. c .. ', ' .. b .. ')')
+                term.setCursorPos(1, e)
+                repeat
+                    local d, h = os.pullEvent('monitor_touch')
+                    monitors[b][c] = h
+                until not a[h]
+                a[monitors[b][c]] = true
+                sleep(0.25)
             end
         end
-        while os.epoch "utc" < start + (f + 1) / fps * 1000 do sleep(1 / fps) end
+        settings.set('sanjuuni.multimonitor', monitors)
+        settings.save()
+        print('Calibration complete. Settings have been saved for future use.')
     end
-end, function()
-    if not speaker or not speaker.playAudio or not audio then return end
-    for _, chunk in ipairs(audio) do
-        while not speaker.playAudio(chunk) do repeat local ev, sp = os.pullEvent("speaker_audio_empty") until sp == peripheral.getName(speaker) end
+    for _, r in ipairs(monitors) do for i, m in ipairs(r) do r[i] = peripheral.wrap(m) peripheral.call(m, "setTextScale", 0.5) peripheral.call(m, "clear") end end
+end
+
+local function readDict(size)
+    local retval = {}
+    for i = 0, size - 1, 2 do
+        local b = file.read()
+        retval[i] = bit32.rshift(b, 4)
+        retval[i+1] = bit32.band(b, 15)
     end
-end)
+    return retval
+end
+local init, read
+if bit32_band(flags, 3) == 1 then
+    local decodingTable, X, readbits, isColor
+    function init(c)
+        isColor = c
+        local R = file.read()
+        local L = 2^R
+        local Ls = readDict(c and 24 or 32)
+        if R == 0 then
+            decodingTable = file.read()
+            X = nil
+            return
+        end
+        local a = 0
+        for i = 0, #Ls do Ls[i] = Ls[i] == 0 and 0 or 2^(Ls[i]-1) a = a + Ls[i] end
+        assert(a == L, a)
+        decodingTable = {R = R}
+        local x, step, next, symbol = 0, 0.625 * L + 3, {}, {}
+        for i = 0, #Ls do
+            next[i] = Ls[i]
+            for _ = 1, Ls[i] do
+                while symbol[x] do x = (x + 1) % L end
+                x, symbol[x] = (x + step) % L, i
+            end
+        end
+        for x = 0, L - 1 do
+            local s = symbol[x]
+            local t = {s = s, n = R - log2(next[s])}
+            t.X, decodingTable[x], next[s] = bit32_lshift(next[s], t.n) - L, t, 1 + next[s]
+        end
+        local partial, bits, pos = 0, 0, 1
+        function readbits(n)
+            if not n then n = bits % 8 end
+            if n == 0 then return 0 end
+            while bits < n do pos, bits, partial = pos + 1, bits + 8, bit32_lshift(partial, 8) + file.read() end
+            local retval = bit32_band(bit32_rshift(partial, bits-n), 2^n-1)
+            bits = bits - n
+            return retval
+        end
+        X = readbits(R)
+    end
+    function read(nsym)
+        local retval = {}
+        if X == nil then
+            for i = 1, nsym do retval[i] = decodingTable end
+            return retval
+        end
+        local i = 1
+        local last = 0
+        while i <= nsym do
+            local t = decodingTable[X]
+            if isColor and t.s >= 16 then
+                local l = 2^(t.s - 15)
+                for n = 0, l-1 do retval[i+n] = last end
+                i = i + l
+            else retval[i], last, i = t.s, t.s, i + 1 end
+            X = t.X + readbits(t.n)
+        end
+        --print(X)
+        return retval
+    end
+else
+    error("Unimplemented!")
+end
+
+local blitColors = {[0] = "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"}
+local start = os.epoch "utc"
+local lastyield = start
+local vframe = 0
+local subs = {}
+term.clear()
+for _ = 1, nframes do
+    local size, ftype = ("<IB"):unpack(file.read(5))
+    --print(size, ftype, file.seek())
+    if ftype == 0 then
+        if os.epoch "utc" - lastyield > 3000 then sleep(0) lastyield = os.epoch "utc" end
+        local dcstart = os.epoch "utc"
+        --print("init screen", vframe, file.seek())
+        init(false)
+        --print("read screen", vframe, file.seek())
+        local screen = read(width * height)
+        --print("init colors", vframe, file.seek())
+        init(true)
+        --print("read bg colors", vframe)
+        local bg = read(width * height)
+        --print("read fg colors", vframe)
+        local fg = read(width * height)
+        local dctime = os.epoch "utc" - dcstart
+        while os.epoch "utc" < start + vframe * 1000 / fps do end
+        local texta, fga, bga = {}, {}, {}
+        for y = 0, height - 1 do
+            local text, fgs, bgs = "", "", ""
+            for x = 1, width do
+                text = text .. string.char(128 + screen[y*width+x])
+                fgs = fgs .. blitColors[fg[y*width+x]]
+                bgs = bgs .. blitColors[bg[y*width+x]]
+            end
+            texta[y+1], fga[y+1], bga[y+1] = text, fgs, bgs
+        end
+        for i = 0, 15 do term.setPaletteColor(2^i, file.read() / 255, file.read() / 255, file.read() / 255) end
+        for y = 1, height do
+            term.setCursorPos(1, y)
+            term.blit(texta[y], fga[y], bga[y])
+        end
+        local delete = {}
+        for i, v in ipairs(subs) do
+            if vframe <= v.frame + v.length then
+                term.setCursorPos(v.x, v.y)
+                term.setBackgroundColor(v.bgColor)
+                term.setTextColor(v.fgColor)
+                term.write(v.text)
+            else delete[#delete+1] = i end
+        end
+        for i, v in ipairs(delete) do table.remove(subs, v - i + 1) end
+        --term.setCursorPos(1, height + 1)
+        --term.clearLine()
+        --print("Frame decode time:", dctime, "ms")
+        vframe = vframe + 1
+    elseif ftype == 1 then
+        local audio = file.read(size)
+        if speaker then
+            if bit32_band(flags, 12) == 0 then
+                local chunk = {audio:byte(1, -1)}
+                for i = 1, #chunk do chunk[i] = chunk[i] - 128 end
+                speaker.playAudio(chunk)
+            else
+                speaker.playAudio(dfpwm.decode(audio))
+            end
+        end
+    elseif ftype == 8 then
+        local data = file.read(size)
+        local sub = {}
+        sub.frame, sub.length, sub.x, sub.y, sub.color, sub.flags, sub.text = ("<IIHHBBs2"):unpack(data)
+        sub.bgColor, sub.fgColor = 2^bit32_rshift(sub.color, 4), 2^bit32_band(sub.color, 15)
+        subs[#subs+1] = sub
+    elseif ftype >= 0x40 and ftype < 0x80 then
+        if ftype == 64 then vframe = vframe + 1 end
+        local mx, my = bit32_band(bit32_rshift(ftype, 3), 7) + 1, bit32_band(ftype, 7) + 1
+        --print("(" .. mx .. ", " .. my .. ")")
+        local term = monitors[my][mx]
+        if os.epoch "utc" - lastyield > 3000 then sleep(0) lastyield = os.epoch "utc" end
+        local width, height = ("<HH"):unpack(file.read(4))
+        local dcstart = os.epoch "utc"
+        --print("init screen", vframe, file.seek())
+        init(false)
+        --print("read screen", vframe, file.seek())
+        local screen = read(width * height)
+        --print("init colors", vframe, file.seek())
+        init(true)
+        --print("read bg colors", vframe)
+        local bg = read(width * height)
+        --print("read fg colors", vframe)
+        local fg = read(width * height)
+        local dctime = os.epoch "utc" - dcstart
+        while os.epoch "utc" < start + vframe * 1000 / fps do end
+        local texta, fga, bga = {}, {}, {}
+        for y = 0, height - 1 do
+            local text, fgs, bgs = "", "", ""
+            for x = 1, width do
+                text = text .. string.char(128 + screen[y*width+x])
+                fgs = fgs .. blitColors[fg[y*width+x]]
+                bgs = bgs .. blitColors[bg[y*width+x]]
+            end
+            texta[y+1], fga[y+1], bga[y+1] = text, fgs, bgs
+        end
+        for i = 0, 15 do term.setPaletteColor(2^i, file.read() / 255, file.read() / 255, file.read() / 255) end
+        for y = 1, height do
+            term.setCursorPos(1, y)
+            term.blit(texta[y], fga[y], bga[y])
+        end
+        --[[local delete = {}
+        for i, v in ipairs(subs) do
+            if vframe <= v.frame + v.length then
+                term.setCursorPos(v.x, v.y)
+                term.setBackgroundColor(v.bgColor)
+                term.setTextColor(v.fgColor)
+                term.write(v.text)
+            else delete[#delete+1] = i end
+        end
+        for i, v in ipairs(delete) do table.remove(subs, v - i + 1) end]]
+        --term.setCursorPos(1, height + 1)
+        --term.clearLine()
+        --print("Frame decode time:", dctime, "ms")
+    else file.close() error("Unknown frame type " .. ftype) end
+end
+
 for i = 0, 15 do term.setPaletteColor(2^i, term.nativePaletteColor(2^i)) end
 term.setBackgroundColor(colors.black)
 term.setTextColor(colors.white)
 term.setCursorPos(1, 1)
 term.clear()
-if not ok then printError(err) end
